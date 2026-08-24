@@ -110,8 +110,11 @@ def main():
 
     print(f"Selected {num_sites} sites meeting criteria", file=sys.stderr)
 
-    # split the sites into chunks based on batch_size
-    num_segments = (num_sites + args.batch_size - 1) // args.batch_size
+    # split the sites into chunks based on batch_size (0 = all sites in single segment)
+    if args.batch_size <= 0 or num_sites <= args.batch_size:
+        num_segments = 1
+    else:
+        num_segments = (num_sites + args.batch_size - 1) // args.batch_size
 
     segments = [
         (i * num_sites // num_segments, (i + 1) * num_sites // num_segments - 1)

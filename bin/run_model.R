@@ -4,52 +4,15 @@ suppressPackageStartupMessages({
     library(tidyverse)
     library(duckdb)
     library(optparse)
-    library(nlme)
-    library(aod)
     library(nanoparquet)
     library(glmmTMB)
+    library(DSS)
 })
 
 
 # ==============================
 # Models
 # ==============================
-
-# homoscedastic Gaussian model
-homo_norm_model <- function(df) {
-    model <- lm(logit ~ group_name, data = df)
-    coefs <- summary(model)$coefficients
-
-    result <- data.frame(
-        estimate = coefs[2, "Estimate"],
-        std_err = coefs[2, "Std. Error"],
-        test_statistic = coefs[2, "t value"],
-        p_value = coefs[2, "Pr(>|t|)"],
-        drop = FALSE
-    )
-    
-    return(result)
-}
-
-hetero_norm_model <- function(df) {
-    model <- gls(
-        logit ~ group_name,
-        data = df,
-        weights = varIdent(form = ~ 1 | sample_name), method = "ML"
-    )
-
-    coefs <- summary(model)$tTable
-
-    result <- data.frame(
-        estimate = coefs[2, "Value"],
-        std_err = coefs[2, "Std.Error"],
-        test_statistic = coefs[2, "t-value"],
-        p_value = coefs[2, "p-value"],
-        drop = FALSE
-    )
-    
-    return(result)
-}
 
 binomial_model <- function(df) {
     agg_df <- binarize(df)
@@ -96,6 +59,63 @@ beta_binomial_model <- function(df) {
     )
     
     return(result)
+}
+
+dss_model <- function(counts_df) {
+    sample_info <- counts_df %>%
+        dplyr::select(sample_name, group_name) %>%
+        dplyr::distinct()
+    
+    groups <- unique(sample_info$group_name)
+    if (length(groups) < 2) {
+        stop("Only one group present; cannot run two-group differential test.")
+    }
+    control_samples <- sample_info$sample_name[sample_info$group_name == groups[1]]
+    treated_samples <- sample_info$sample_name[sample_info$group_name == groups[2]]
+    all_samples     <- c(control_samples, treated_samples)
+    
+    bsseq_list <- lapply(all_samples, function(sample) {
+        sample_df <- counts_df %>% dplyr::filter(sample_name == sample) %>% dplyr::arrange(site_idx)
+        data.frame(
+            chr = "chr1",
+            pos = sample_df$site_idx,
+            N   = as.integer(sample_df$total),
+            X   = as.integer(sample_df$successes)
+        )
+    })
+    names(bsseq_list) <- all_samples
+    
+    # Adaptive equal.disp:
+    # If both groups have replicates (>= 2), allow unequal dispersions (DSS default);
+    # if either group has only 1 sample, assume equal dispersion across groups.
+    use_equal_disp <- (length(control_samples) < 2 || length(treated_samples) < 2)
+    
+    # Use available CPU cores (leaving 1 core for system overhead)
+    n_cores <- max(1L, parallel::detectCores() - 1L)
+    
+    # Build BSseq object
+    bsseq_data <- DSS::makeBSseqData(bsseq_list, sampleNames = all_samples)
+    
+    # Run DSS
+    dml_results <- DSS::DMLtest(
+        bsseq_data,
+        group1     = control_samples,
+        group2     = treated_samples,
+        smoothing  = FALSE,
+        equal.disp = use_equal_disp,
+        ncores     = n_cores
+    )
+    
+    result_df <- data.frame(
+        site_idx       = dml_results$pos,
+        estimate       = dml_results$diff,
+        std_err        = dml_results$diff.se,
+        test_statistic = dml_results$stat,
+        p_value        = dml_results$pval,
+        drop           = is.na(dml_results$pval)
+    )
+    
+    return(result_df)
 }
 
 
@@ -245,8 +265,6 @@ run_model <- function(df, model_type="none") {
     }
 
     model_func <- switch(model_type,
-        homo_norm = homo_norm_model,
-        hetero_norm = hetero_norm_model,
         binomial = binomial_model,
         beta_binomial = beta_binomial_model,
         stop("Unknown model type: ", model_type)
@@ -333,8 +351,8 @@ get_args <- function() {
             help = "Output TSV filename [default=%default]", metavar = "character"
         ),
         make_option(c("--model"),
-            type = "character",
-            help = "Statistical model to use: homo_norm, hetero_norm, binomial, or beta_binomial [default=%default]", metavar = "character"
+            type = "character", default = "dss",
+            help = "Statistical model to use: dss (default), adaptive_binomial, binomial, or beta_binomial [default=%default]", metavar = "character"
         ),
         make_option(c("--gtf"),
             type = "character", default = NULL,
@@ -402,45 +420,97 @@ output_df <- data.frame(
 
 start_time <- Sys.time()
 
-INTERVAL <- 512
-
-# process in batches, since batched database access is much faster than single-row
-for (offset in seq(args$start, args$end - 1, by = INTERVAL)) {
-    start <- offset
-    end <- min(offset + INTERVAL - 1, args$end)
-
-    cat("Processing rows", start, "to", end, "...\n")
-
-    batch <- fetch_dataframe(start, end, args$sites_database, args$reads_database)
-
-    for (i in seq_len(nrow(batch$sites))) {
-        site_tx_id <- batch$sites$transcript_id[i]
-        site_tx_pos <- batch$sites$transcript_position[i]
-        site_rname <- batch$sites$rname[i]
-        site_chr <- batch$sites$chr[i]
-        site_chr_pos <- batch$sites$chr_position[i]
-
-        site_reads <- batch$reads %>%
-            filter(
-                rname == site_rname,
-                transcript_position == site_tx_pos,
-                ignored == FALSE
+if (args$model == "dss") {
+    cat(sprintf("Processing batch (all %d sites) with DSS...\n", n_rows))
+    
+    # Fetch all sites and reads for the full batch
+    batch_data <- fetch_dataframe(args$start, args$end, args$sites_database, args$reads_database)
+    
+    if (nrow(batch_data$sites) > 0) {
+        threshold <- args$modification_threshold
+        
+        # Join reads with site indices (1:N_sites in batch)
+        sites_indexed <- batch_data$sites %>%
+            dplyr::mutate(site_idx = seq_len(nrow(batch_data$sites)))
+        
+        reads_filtered <- batch_data$reads %>%
+            dplyr::filter(ignored == FALSE)
+        
+        # Aggregate raw reads into sample counts (NO added pseudocounts for DSS)
+        counts_summary <- reads_filtered %>%
+            dplyr::inner_join(
+                sites_indexed %>% dplyr::select(rname, transcript_position, site_idx),
+                by = c("rname", "transcript_position")
+            ) %>%
+            dplyr::group_by(site_idx, sample_name, group_name) %>%
+            dplyr::summarise(
+                successes = sum(probability_modified >= threshold),
+                total     = n(),
+                .groups   = "drop"
             )
+        
+        # Run DSS on all sites in batch
+        dss_results <- dss_model(counts_summary)
+        
+        # Explicit fail-safe join by site_idx
+        matched_output <- sites_indexed %>%
+            dplyr::left_join(dss_results, by = "site_idx")
+        
+        # Populate output_df directly
+        output_df$transcript_id       <- matched_output$transcript_id
+        output_df$transcript_position <- matched_output$transcript_position
+        output_df$rname               <- matched_output$rname
+        output_df$chr                 <- matched_output$chr
+        output_df$chr_position        <- matched_output$chr_position
+        output_df$estimate            <- matched_output$estimate
+        output_df$std_err             <- matched_output$std_err
+        output_df$test_statistic      <- matched_output$test_statistic
+        output_df$p_value             <- matched_output$p_value
+        output_df$drop                <- ifelse(is.na(matched_output$drop), TRUE, matched_output$drop)
+        output_df$model_type          <- "dss"
+        output_df$error               <- FALSE
+        output_df$error_message       <- NA_character_
+    }
+} else {
+    INTERVAL <- 512
+    # process in batches, since batched database access is much faster than single-row
+    for (offset in seq(args$start, args$end - 1, by = INTERVAL)) {
+        start <- offset
+        end <- min(offset + INTERVAL - 1, args$end)
 
-        site_df <- process_modification_site(site_reads, args$model)
+        cat("Processing rows", start, "to", end, "...\n")
 
-        # add metadata to the site
-        site_df$transcript_id <- site_tx_id
-        site_df$transcript_position <- site_tx_pos
-        site_df$rname <- site_rname
-        site_df$chr <- site_chr
-        site_df$chr_position <- site_chr_pos
+        batch <- fetch_dataframe(start, end, args$sites_database, args$reads_database)
 
-        if (!(is.na(output_df$model_type[offset - args$start + i]))) {
-            stop("Model type not recorded for site ", site_tx_id, ":", site_tx_pos)
+        for (i in seq_len(nrow(batch$sites))) {
+            site_tx_id <- batch$sites$transcript_id[i]
+            site_tx_pos <- batch$sites$transcript_position[i]
+            site_rname <- batch$sites$rname[i]
+            site_chr <- batch$sites$chr[i]
+            site_chr_pos <- batch$sites$chr_position[i]
+
+            site_reads <- batch$reads %>%
+                filter(
+                    rname == site_rname,
+                    transcript_position == site_tx_pos,
+                    ignored == FALSE
+                )
+
+            site_df <- process_modification_site(site_reads, args$model)
+
+            # add metadata to the site
+            site_df$transcript_id <- site_tx_id
+            site_df$transcript_position <- site_tx_pos
+            site_df$rname <- site_rname
+            site_df$chr <- site_chr
+            site_df$chr_position <- site_chr_pos
+
+            if (!(is.na(output_df$model_type[offset - args$start + i]))) {
+                stop("Model type not recorded for site ", site_tx_id, ":", site_tx_pos)
+            }
+
+            output_df[offset - args$start + i, ] <- site_df[, names(output_df)]
         }
-
-        output_df[offset - args$start + i, ] <- site_df[, names(output_df)]
     }
 }
 

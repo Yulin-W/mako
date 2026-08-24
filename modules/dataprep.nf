@@ -71,13 +71,13 @@ process SITE_SELECTION {
 
     script:
     """
-    # Select sites for differential analysis based on the prepared data
+    # Select sites for differential analysis (batch-size 0 is a special case for a single batch with all sites)
     select_sites.py \\
         --in-db ${database} \\
         --out-db sites.duckdb \\
         --min-reads-per-sample ${params.min_reads_per_sample} \\
         --segments segments.csv \\
-        --batch-size 75000 \\
+        --batch-size ${params.method == 'dss' ? 0 : 75000} \\
         --output-file segments.csv
     
     map_to_genome.R sites.duckdb ${gtf}

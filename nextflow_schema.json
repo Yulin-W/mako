@@ -69,8 +69,8 @@
       "properties": {
         "method": {
           "type": "string",
-          "default": "adaptive_binomial",
-          "enum": ["adaptive_binomial", "binomial", "beta_binomial"],
+          "default": "dss",
+          "enum": ["dss", "adaptive_binomial", "binomial", "beta_binomial"],
           "description": "Model to use to call differentially modified sites"
         },
         "mod_threshold": {

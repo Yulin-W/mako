@@ -36,3 +36,4 @@ if (!require("BiocManager", quietly = TRUE))
 
 BiocManager::install("GenomicFeatures")
 BiocManager::install("txdbmaker")
+BiocManager::install("DSS")
