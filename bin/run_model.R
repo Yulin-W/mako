@@ -62,9 +62,7 @@ beta_binomial_model <- function(df) {
 }
 
 dss_model <- function(counts_df) {
-    sample_info <- counts_df %>%
-        dplyr::select(sample_name, group_name) %>%
-        dplyr::distinct()
+    sample_info <- unique(counts_df[, c("sample_name", "group_name")])
     
     groups <- unique(sample_info$group_name)
     if (length(groups) < 2) {
@@ -75,7 +73,8 @@ dss_model <- function(counts_df) {
     all_samples     <- c(control_samples, treated_samples)
     
     bsseq_list <- lapply(all_samples, function(sample) {
-        sample_df <- counts_df %>% dplyr::filter(sample_name == sample) %>% dplyr::arrange(site_idx)
+        sample_df <- counts_df[counts_df$sample_name == sample, ]
+        sample_df <- sample_df[order(sample_df$site_idx), ]
         data.frame(
             chr = "chr1",
             pos = sample_df$site_idx,
