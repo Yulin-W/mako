@@ -72,8 +72,43 @@ dss_model <- function(counts_df) {
     treated_samples <- sample_info$sample_name[sample_info$group_name == groups[2]]
     all_samples     <- c(control_samples, treated_samples)
     
+    # Filter away trivial non-differentially modified sites
+    # (sites with 0 modified reads or 0 unmodified reads across all samples)
+    site_totals <- stats::aggregate(cbind(successes, total) ~ site_idx, data = counts_df, FUN = sum)
+    is_trivial  <- (site_totals$successes == 0L) | (site_totals$successes == site_totals$total)
+    trivial_site_ids     <- site_totals$site_idx[is_trivial]
+    non_trivial_site_ids <- site_totals$site_idx[!is_trivial]
+    
+    # Trivial sites output (drop = TRUE, NA statistics)
+    trivial_results <- if (length(trivial_site_ids) > 0) {
+        data.frame(
+            site_idx       = trivial_site_ids,
+            estimate       = NA_real_,
+            std_err        = NA_real_,
+            test_statistic = NA_real_,
+            p_value        = NA_real_,
+            drop           = TRUE
+        )
+    } else {
+        data.frame(
+            site_idx       = integer(0),
+            estimate       = numeric(0),
+            std_err        = numeric(0),
+            test_statistic = numeric(0),
+            p_value        = numeric(0),
+            drop           = logical(0)
+        )
+    }
+    
+    if (length(non_trivial_site_ids) == 0) {
+        return(trivial_results[order(trivial_results$site_idx), ])
+    }
+    
+    # Process only non-trivial candidate sites with DSS
+    valid_counts_df <- counts_df[counts_df$site_idx %in% non_trivial_site_ids, ]
+    
     bsseq_list <- lapply(all_samples, function(sample) {
-        sample_df <- counts_df[counts_df$sample_name == sample, ]
+        sample_df <- valid_counts_df[valid_counts_df$sample_name == sample, ]
         sample_df <- sample_df[order(sample_df$site_idx), ]
         data.frame(
             chr = "chr1",
@@ -105,7 +140,7 @@ dss_model <- function(counts_df) {
         ncores     = n_cores
     )
     
-    result_df <- data.frame(
+    valid_results <- data.frame(
         site_idx       = dml_results$pos,
         estimate       = dml_results$diff,
         std_err        = dml_results$diff.se,
@@ -113,6 +148,11 @@ dss_model <- function(counts_df) {
         p_value        = dml_results$pval,
         drop           = is.na(dml_results$pval)
     )
+    
+    # Combine valid test results with dropped trivial sites
+    result_df <- rbind(valid_results, trivial_results)
+    result_df <- result_df[order(result_df$site_idx), ]
+    rownames(result_df) <- NULL
     
     return(result_df)
 }
