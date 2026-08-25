@@ -64,17 +64,19 @@ jobs:
     container:
       image: quay.io/singularity/singularity:v4.1.0
       options: --privileged
+    env:
+      SINGULARITY_DOCKER_USERNAME: ${{ github.actor }}
+      SINGULARITY_DOCKER_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Log in to GHCR for Singularity ORAS
+      - name: Log in to GHCR for Singularity ORAS and Docker
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | \
-            singularity remote login -u ${{ github.actor }} --password-stdin oras://ghcr.io
+            singularity registry login --username ${{ github.actor }} --password-stdin oras://ghcr.io
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            singularity registry login --username ${{ github.actor }} --password-stdin docker://ghcr.io
 
       - name: Build Singularity SIF from Docker
-        env:
-          SINGULARITY_DOCKER_USERNAME: ${{ github.actor }}
-          SINGULARITY_DOCKER_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           DOCKER_IMG="docker://ghcr.io/${{ needs.build-docker.outputs.owner }}/mako_main_docker:${{ needs.build-docker.outputs.tag }}"
