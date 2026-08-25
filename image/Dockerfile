@@ -26,7 +26,7 @@ RUN wget -qO- https://cloud.r-project.org/bin/linux/ubuntu/marutter_pubkey.asc |
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
     # general dependencies
-    r-base-core python3 python3-pip samtools tabix \
+    r-base-core python3 python3-pip samtools tabix unzip \
     build-essential libcurl4-openssl-dev libxml2-dev \
     libssl-dev zlib1g-dev libbz2-dev liblzma-dev libpcre2-dev \
     # packages
@@ -57,6 +57,7 @@ RUN Rscript install_R_dependencies.R
 # move files to PATH
 RUN ln -s $(realpath modkit/modkit) /usr/local/bin/modkit
 
-# install duckdb
-RUN curl https://install.duckdb.org | sh && \
-    cp ~/.duckdb/cli/latest/duckdb /usr/local/bin/
+# install duckdb CLI
+RUN wget "https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip" -O duckdb.zip \
+    && unzip duckdb.zip -d /usr/local/bin \
+    && rm duckdb.zip
